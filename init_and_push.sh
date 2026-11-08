@@ -1,73 +1,59 @@
 #!/usr/bin/env bash
-# =============================================================================
-# SGU-Notice-RAG —— Git 初始化与首次推送
+# 一键把当前目录推到远端。
 #
-# 用途：把当前工作区初始化成一个独立的 git 仓库，打一个基线提交，推到 GitHub。
-# 用法：
-#   1) 先把 REMOTE_URL 改成你们自己的仓库地址（见文件末尾的提示）
-#   2) bash init_and_push.sh
-#
-# 为什么是"独立仓库"而不是塞进某个已有仓库的子目录：
-#   GitHub Actions 只执行仓库根目录下的 .github/workflows/。
-#   本项目把 CI 放在 .github/workflows/ci.yml，若作为子目录推送，CI 永远不会跑。
-#   同理 .github/PULL_REQUEST_TEMPLATE.md 也只有位于仓库根才对 PR 生效。
-# =============================================================================
+# 注意：这个脚本只在**第一次建仓**时用。项目已经在
+# https://github.com/A1muE4aY/SGU-Notice-RAG 上跑起来了，
+# 日常开发走分支 + PR（见 CONTRIBUTING.md），不要用它直推 main。
 set -euo pipefail
 
 REMOTE_URL="${REMOTE_URL:-https://github.com/A1muE4aY/SGU-Notice-RAG.git}"
-BASELINE_MSG="chore: 初始化项目骨架，建立 API 契约、Skill 约束与文档基线"
+BRANCH="${BRANCH:-main}"
 
-# 0) 前置检查：不要在一个已有仓库里重复初始化
+echo "==> 目标仓库：$REMOTE_URL（分支 $BRANCH）"
+
+# 防御 1：已经是 git 仓库就退出，避免把已有历史覆盖掉
 if [ -d .git ]; then
-  echo "✗ 当前目录已经是 git 仓库（存在 .git）。"
-  echo "  如果你要重新初始化，请先自行确认并删除 .git（这一步不可撤销，脚本不代做）。"
-  exit 1
+    echo "✗ 当前目录已经是 git 仓库。"
+    echo "  如果你只是想推送改动：git push origin $BRANCH"
+    echo "  如果你确实要重新初始化：先备份 .git 再手动删除。"
+    exit 1
 fi
 
-# 1) 初始化 git 仓库
-#    -b main：直接以 main 为主分支，避免之后再 rename 时远端默认分支对不上
-git init -b main
-
-# 2) 确认忽略规则生效：.env 与构建产物绝不能进仓库
-#    （.gitignore 已经写好；这里再核一次，防止有人删过它）
-if ! grep -q '^\.env$' .gitignore 2>/dev/null; then
-  echo "✗ .gitignore 里没有 .env 规则，先修好再提交（密钥泄露不可回滚）。"
-  exit 1
+# 防御 2：.env 必须被忽略。真提交一次密钥就得全部轮换。
+if ! grep -qE '^\.env$' .gitignore 2>/dev/null; then
+    echo "✗ .gitignore 里没有 '.env' 规则。"
+    echo "  先补上再跑这个脚本 —— 泄露一次密钥，六个人都要轮换。"
+    exit 1
 fi
 
-# 3) 添加所有文件
+git init -b "$BRANCH"
+
+# 四份非交付物（元提示词、外来的两份说明、一个脚本）与空目录不入库。
+if [ -d .git/info ]; then
+    cat >> .git/info/exclude <<'EOF'
+
+# 本地材料，不属于仓库内容
+/0.txt
+/git-ready.txt
+/group-ready.txt
+/tools-common.js
+/source/
+EOF
+fi
+
 git add -A
 
-# 4) 提交初始基线
-#    - 用 -m 而不是打开编辑器，保证脚本可无人值守执行
-#    - 若仓库里没有任何可提交内容会失败，这里显式提示，而不是抛一个看不懂的 git 错误
+# 防御 3：没什么可提交的就别建空提交
 if git diff --cached --quiet; then
-  echo "✗ 没有可提交的内容（检查 .gitignore 是否把一切都忽略了）。"
-  exit 1
+    echo "✗ 没有可提交的内容。"
+    exit 1
 fi
-git commit -m "$BASELINE_MSG"
 
-# 5) 主分支名兜底
-#    -b main 已经设好；这一步只兜住"旧版 git 不认 -b"的环境
-git branch -M main
-
-# 6) 关联远程仓库并推送
-#    --set-upstream 让之后可以直接 git push / git pull 而不必带参数
-echo
-echo "即将关联远程仓库：$REMOTE_URL"
-echo "（如果这不是你们的仓库地址，按 Ctrl+C 中止，修改本文件顶部的 REMOTE_URL 后重跑）"
-git remote add origin "$REMOTE_URL" 2>/dev/null || git remote set-url origin "$REMOTE_URL"
-git push -u origin main
+git commit -m "chore: 初始化项目骨架，建立 API 契约、Skill 约束与文档基线"
+git remote add origin "$REMOTE_URL"
+git push -u origin "$BRANCH"
 
 echo
-echo "✓ 基线已推送到 $REMOTE_URL （分支 main）"
-echo
-echo "接下来（不要跳过，否则 CI 与 PR 模板都不生效）："
-echo "  1. 到 GitHub → Settings → Branches → 把 main 设为 Protected："
-echo "     禁止直接 push、要求 1 个以上 Reviewer、要求 CI 通过才能合并。"
-echo "  2. 到 GitHub → Issues → 为 A–F 六人分配第一周任务（已创建）。"
-echo "  3. 把 README.md 里的 <仓库地址> 占位替换成真实地址。"
-echo
-echo "提示："
-echo "  - 每个人拉自己的分支：git checkout -b feat/A-scraper"
-echo "  - 直接 push 到 main 会被保护规则拒绝 —— 这是设计如此，不是配置错误。"
+echo "==> 完成。接下来两件事："
+echo "    1. 到 GitHub 仓库设置里开启分支保护（main 要求 PR + 1 个 approve）"
+echo "    2. 把 Issue 面板链接发到群里"
