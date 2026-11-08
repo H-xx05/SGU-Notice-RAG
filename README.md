@@ -113,6 +113,7 @@ curl -N "http://localhost:8088/api/v1/chat/stream?q=2026年转专业报名截止
 | 文档 | 读者 | 内容 |
 |---|---|---|
 | [`docs/kickoff.md`](docs/kickoff.md) | **新人第一天先看这个** | 六人各自的开工步骤、本周五交什么、契约变更流程 |
+| [`docs/kickoff-announcement.md`](docs/kickoff-announcement.md) | 群通知文案 | 项目启动时发群里的那条消息（含六个 Issue 与仓库链接） |
 | [`docs/prd.md`](docs/prd.md) | 全员 / 评审 | 问题陈述、persona、成功指标、范围、验收 |
 | [`docs/api.md`](docs/api.md) | C / D | **冻结契约**：6 个对外端点 + 2 个内部端点 |
 | [`docs/data-model.md`](docs/data-model.md) | A / B / E | chunk schema、DDL、时间过滤顺序 |
@@ -165,6 +166,7 @@ SGU-Notice-RAG/
 │
 ├── docs/
 │   ├── kickoff.md             六人启动指令（新人第一天先看这个）
+│   ├── kickoff-announcement.md  项目启动群通知文案
 │   ├── prd.md                 PRD：问题 / persona / 5 项指标 / 范围
 │   ├── api.md                 冻结契约：6 对外 + 2 内部端点
 │   ├── data-model.md          chunk schema / DDL / 时间过滤顺序
