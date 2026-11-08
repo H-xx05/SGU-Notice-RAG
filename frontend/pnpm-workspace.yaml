@@ -3,6 +3,12 @@
 # esbuild 有 postinstall（装平台二进制），pnpm 默认不跑。不放行的话
 # `vite build` 会报 ERR_PNPM_IGNORED_BUILDS / "You installed esbuild for another platform"。
 #
+# `packages` 是**必填**的：只要这个文件存在，pnpm 就按 workspace 处理，
+# pnpm 9 会直接报 `ERR_PNPM_PACKAGES_FIELD_MISSING: packages field missing or empty`。
+# 这里只有一个包（前端自己），写 `['.']` 表示"把当前目录当作唯一的 workspace 包"。
+packages:
+  - '.'
+
 # 两个键名都写上：`allowBuilds` 是 pnpm 12 的新写法，`onlyBuiltDependencies`
 # 是 pnpm 9/10 的写法（CI 里钉的是 pnpm 9）。多写一个键没有副作用，
 # 少写一个就会让某一代 pnpm 直接装不上 —— 这是故意的冗余。
