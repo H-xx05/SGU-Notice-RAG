@@ -21,7 +21,11 @@ COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml ./
 # 一旦某一代 pnpm 改了 lockfile 语义，构建就在你没有改任何代码的日子里挂掉。
 # 不在 package.json 写 packageManager 字段，是因为那会与 CI 里
 # pnpm/action-setup@v4 显式指定的 version 冲突（它要求二者只出现一个）。
-RUN corepack prepare pnpm@12.18.0 --activate \
+#
+# `corepack enable` 不能省：`prepare --activate` 只是把版本落盘，
+# 真正在 PATH 上创建 pnpm shim 的是 enable。少了它报 `/bin/sh: pnpm: not found`（127）。
+RUN corepack enable \
+    && corepack prepare pnpm@12.18.0 --activate \
     && pnpm install --frozen-lockfile
 
 COPY . .
