@@ -1,0 +1,8 @@
+# B 的模型依赖（可选）：只有把 RAG_STUB_MODE 设为 false 才需要装。
+#   docker compose --profile models up model-puller
+#   pip install -r requirements-models.txt
+# 体积约 4.5 GB（bge-m3 + bge-reranker-v2-m3），因此不进主镜像。
+FlagEmbedding==1.3.3
+torch==2.5.1
+transformers==4.44.2
+sentence-transformers==3.2.1

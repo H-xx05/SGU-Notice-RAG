@@ -1,0 +1,38 @@
+[project]
+name = "sgu-notice-eval"
+version = "0.1.0"
+description = "SGU-Notice-RAG 的评估跑批与报表（指标计算零依赖）"
+requires-python = ">=3.11"
+# 核心指标（stale_recall_rate / refusal_rate / context_precision）纯标准库实现，
+# 故意不依赖 ragas —— 它要 LLM judge，跑一次要联网要钱，CI 里跑不了。
+dependencies = []
+
+[project.optional-dependencies]
+# 生成质量指标（faithfulness / answer_relevancy）。本地按需装，不进 CI。
+ragas = ["ragas>=0.2", "datasets>=2.20"]
+# 写回 Postgres 才需要。
+db = ["psycopg[binary]>=3.2"]
+dev = ["pytest>=8.0", "ruff>=0.8"]
+
+[project.scripts]
+sgu-eval = "runner.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["runner*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

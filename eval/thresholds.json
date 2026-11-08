@@ -1,0 +1,58 @@
+{
+  "_comment": "评估阈值与时效判定参数的唯一来源。改这里必须由 E 组确认，并在 PR 里贴前后对比。",
+  "_doc": "docs/prd.md 的成功指标 M1–M5 落在 targets 里；runtime 里的数字必须与 rag-core/app/settings.py 保持一致（有测试盯着）。",
+  "targets": {
+    "stale_recall_rate": {
+      "op": "<=",
+      "value": 0.15,
+      "sprint": 0.1,
+      "fallback": 0.2,
+      "label": "过期误召回率"
+    },
+    "refusal_rate": {
+      "op": ">=",
+      "value": 0.9,
+      "label": "拒答准确率"
+    },
+    "faithfulness": {
+      "op": ">=",
+      "value": 0.85,
+      "label": "忠实度"
+    },
+    "context_precision": {
+      "op": ">=",
+      "value": 0.7,
+      "label": "上下文精确率"
+    },
+    "answer_relevancy": {
+      "op": ">=",
+      "value": 0.75,
+      "label": "答案相关性"
+    }
+  },
+  "latency": {
+    "p99_ms": 2000,
+    "first_token_ms": 1000
+  },
+  "runtime": {
+    "_comment": "以下数字同时出现在 rag-core/app/settings.py 与 api-server/internal/handler/handler.go，改动需三处同步。",
+    "min_answer_score": 0.35,
+    "stale_penalty": 0.5,
+    "rrf_k": 2,
+    "dense_top_k": 40,
+    "sparse_top_k": 40,
+    "rerank_top_k": 20,
+    "final_top_k": 8
+  },
+  "dataset": {
+    "_comment": "min_* 是元提示词给的**骨架下限**（不满足则 check 直接失败）；validity_* 是**评估有效性下限**（不满足则 check 只告警，但报告结论标注为「不具统计意义」）。",
+    "min_queries": 5,
+    "min_no_answer": 1,
+    "min_cross_year_trap": 1,
+    "validity_trap_denominator": 10,
+    "validity_no_answer_denominator": 10,
+    "target_queries": 40,
+    "target_no_answer": 10,
+    "target_cross_year_trap": 10
+  }
+}

@@ -1,0 +1,35 @@
+[project]
+name = "sgu-rag-core"
+version = "0.1.0"
+description = "SGU-Notice-RAG 检索与时效性判定服务（内部服务，不对外暴露）"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.115.5",
+  "uvicorn[standard]==0.32.1",
+  "pydantic==2.10.3",
+  "pydantic-settings==2.7.0",
+  "httpx==0.28.1",
+  "qdrant-client==1.12.1",
+  "FlagEmbedding==1.3.3",
+  "langchain-core==0.3.28",
+  "langchain-text-splitters==0.3.4",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.3.4",
+  "pytest-asyncio==0.24.0",
+  "ruff==0.8.4",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

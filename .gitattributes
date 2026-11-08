@@ -1,0 +1,15 @@
+# 默认按文本处理，避免 Windows 上的 CRLF 混进提交。
+* text=auto eol=lf
+
+# 但 .cmd/.bat 与 Nginx/Windows 之外的少数场景需要保留 CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 明确标记二进制，防止 diff/合并损坏
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff2 binary
+
+# Shell 脚本必须在 Linux 容器里可执行
+*.sh text eol=lf

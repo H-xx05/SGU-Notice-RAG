@@ -1,0 +1,14 @@
+# 【C 所有】构建上下文裁剪：不要把本地产物/缓存带进镜像
+.git
+.gitignore
+*.md
+!README.md
+Dockerfile
+.dockerignore
+bin/
+tmp/
+*.test
+*.out
+coverage.*
+.vscode/
+.idea/
