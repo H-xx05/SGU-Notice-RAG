@@ -293,7 +293,7 @@ data: {"latency_ms":912,"refused":false}
 
 违反任意一条，PR 直接打回：
 
-1. **不新增 compose 服务、不改服务名与端口**（清单见 `docs/deployment.md`，A—F 一致）。需要新依赖时先和 F 谈，由 F 改 `docker-compose.yml`。
+1. **不新增 compose 服务、不改服务名与端口**（清单见 `docs/deployment.md §3` 与 `docs/architecture.md §5`，A—F 一致）。需要新依赖时先和 F 谈，由 F 改 `docker-compose.yml`。`qdrant-init` 是 F 维护的一次性服务，**不属于可改范围**；`rag-core` 只走 `expose`，**不得**改回 `ports`（那会让 `/internal/*` 绕过 nginx）。
 2. **不修改 API 路径、方法、字段名或类型**；不把可选字段变必填；不在响应里塞未登记字段。
 3. **前端不得硬编码后端地址**：只准读 `import.meta.env.VITE_API_BASE_URL`，默认 `/api`，由 Nginx 反代。
 4. **不绕过受限采集参数**：所有抓取必须经过 `ALLOWED_DOMAINS` / `REQUEST_DELAY_SECONDS`(≥1) / `MAX_PAGES_PER_RUN`(列表页) / `MAX_REQUESTS_PER_RUN`(含详情页与重试) **四道闸门**；**禁止**递归抓全站、禁止并发无节流、禁止登录态抓取、禁止抓取 robots 禁止路径、**禁止为绕过 WAF 403 而提高并发或缩短延时**（那是把课程项目变成攻击）。

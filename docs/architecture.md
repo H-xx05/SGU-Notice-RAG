@@ -153,13 +153,19 @@ infra(F) ── 编排上述所有进程，不参与业务调用
 |---|---|---|---|---|
 | `frontend` | 5173→80 | `frontend/Dockerfile` | — | `GET /` |
 | `api-server` | 8080 | `api-server/Dockerfile` | postgres、redis、rag-core | `GET /healthz` |
-| `rag-core` | 8000 | `rag-core/Dockerfile` | qdrant | `GET /internal/health` |
+| `rag-core` | 8000（**不映射宿主机**） | `rag-core/Dockerfile` | qdrant、qdrant-init | `GET /internal/health` |
+| `qdrant-init` | — （一次性） | `curlimages/curl:8.10` | qdrant | 退出码 0 |
 | `qdrant` | 6333/6334 | `qdrant/qdrant:v1.12` | — | `GET /healthz` |
 | `postgres` | 5432 | `postgres:16-alpine` | — | `pg_isready` |
 | `redis` | 6379 | `redis:7-alpine` | — | `redis-cli ping` |
 | `nginx` | 8088→80 | `nginx:1.27-alpine` | frontend、api-server | `GET /healthz` |
 
 > 端口与健康检查路径是**冻结项**（`SKILL.md §6`），A—E 不得自行增删服务。
+
+`qdrant-init` 是一次性服务：建 collection 与六项 payload 索引后退出，
+`rag-core` 通过 `service_completed_successfully` 等它。**不做成常驻**，
+collection schema 属于数据层契约，不应藏在检索服务的启动路径里。
+`rag-core` 用 `expose` 而非 `ports` —— `/internal/*` 只该被 `api-server` 调用。
 
 ---
 

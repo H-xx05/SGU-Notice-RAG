@@ -104,7 +104,7 @@ curl -N "http://localhost:8088/api/v1/chat/stream?q=2026年转专业报名截止
 `SCRAPER_REQUEST_DELAY_SECONDS`）与第四道闸门 `SCRAPER_MAX_REQUESTS_PER_RUN`（含详情页与重试，硬顶 2000），
 `ingestion/ingestion/config.py` **两种拼法都读**，以正式长名为准 —— 变量名写错等于闸门失效，所以不做静默忽略。
 
-完整变量表（含 JWT、DSN、模型名共 **29 项**）见 [`docs/deployment.md §4`](docs/deployment.md)。
+完整变量表（含 JWT、DSN、模型名共 **30 项**）见 [`docs/deployment.md §4`](docs/deployment.md)。
 
 ---
 
@@ -155,7 +155,7 @@ bash .claude/skills/sgu-notice-rag-dev/scripts/check-contract.sh
 SGU-Notice-RAG/
 ├── README.md                  本文件
 ├── docker-compose.yml         7 服务编排（nginx/frontend/api-server/rag-core/qdrant/postgres/redis）
-├── .env.example              29 项环境变量（含采集四道闸门）
+├── .env.example              30 项环境变量（含采集四道闸门）
 ├── .gitattributes             行尾统一为 LF（Windows 上 clone 不会被 CRLF 污染）
 ├── .github/workflows/ci.yml   三 job：lint / test / build
 │
