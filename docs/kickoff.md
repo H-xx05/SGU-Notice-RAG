@@ -57,7 +57,7 @@ git switch -c feat/F-infra          # F
 | 项 | 内容 |
 |---|---|
 | **第一步** | `cd rag-core && python -m pytest -q`（应 43 passed），再 `uvicorn app.main:app --port 8000` 起服，`curl -X POST localhost:8000/internal/retrieve -H 'Content-Type: application/json' -d '{"query":"转专业","time_filter":{"mode":"auto"}}'` |
-| **本周五必交** | ① 把 `RAG_STUB_MODE=false` 下的真实 bge-m3 + reranker 接进来（`app/embedder.py` 的 `_real_*` 三个桩）；② `QdrantStore.hybrid_search` 打到真实 collection 上（现在 fixture 模式已可跑通全链路） |
+| **本周五必交** | ① 把 `RAG_STUB_MODE=false` 下的真实 bge-m3 + reranker 接进来（`app/embedder.py` 的 `_real_*` 三个桩）；② `QdrantStore.hybrid_search` 打到真实 collection 上（现在 fixture 模式已可跑通全链路）。注意 `RAG_STUB_MODE=false` 需要 `WITH_MODELS=1 docker compose build rag-core model-puller` + `model-puller` 预下载权重，两样缺一就起不来（`rag-core/README.md`「接真实模型」） |
 | **不要做** | 不要动 `app/time_filter.py` 的三条既有行为（长期有效靠 `is_empty` 分支、降权在精排后截断前、`mode=off` 时 `applied_filters` 必须为空）—— 这三条有测试锁着，E 的评估口径依赖它们 |
 | **验收命令** | `python -m pytest -q` && `ruff check app tests` |
 

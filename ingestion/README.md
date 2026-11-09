@@ -100,7 +100,7 @@ ingestion/
 ## 测试
 
 ```bash
-pytest tests -q        # 68 passed
+pytest tests -q        # 72 passed
 ruff check ingestion tests
 ```
 

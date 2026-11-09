@@ -202,7 +202,7 @@ SGU-Notice-RAG/
 └── infra/                     【F】基础设施
     ├── nginx/default.conf     反向代理（关缓冲保 SSE）+ SPA 转发
     ├── postgres/init/         001_schema.sql（与 data-model.md 逐字段一致）
-    └── scripts/               wait-for · init-qdrant · reset-qdrant
+    └── scripts/               wait-for · init-qdrant · reset-qdrant · test-init-qdrant.py
 ```
 
 ---

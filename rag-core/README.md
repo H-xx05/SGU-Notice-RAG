@@ -9,7 +9,7 @@
 cd rag-core
 python -m venv .venv && .venv/Scripts/activate      # Windows
 pip install -e ".[dev]"
-pytest -q                                            # 36 个用例，全部离线可跑
+pytest -q                                            # 43 个用例，全部离线可跑
 uvicorn app.main:app --port 8000 --reload
 ```
 
@@ -18,13 +18,30 @@ uvicorn app.main:app --port 8000 --reload
 
 ## 接真实模型
 
+真实检索要**两样东西**，缺一个都起不来：
+
+| 要什么 | 怎么给 | 为什么 |
+|---|---|---|
+| 依赖库（torch + FlagEmbedding） | 构建参数 `WITH_MODELS=1` | 默认镜像**不含**它们，`import FlagEmbedding` 会直接 ImportError |
+| 权重（bge-m3 + reranker，约 2.3 GB） | `model-puller` 下到 `model-cache` 卷 | 权重不进镜像，避免每次改代码重下 |
+
 ```bash
+# 容器里（推荐）
+WITH_MODELS=1 docker compose build rag-core model-puller
+WITH_MODELS=1 docker compose --profile models run --rm model-puller
+# 然后在 .env 里 RAG_STUB_MODE=false，重启 rag-core
+
+# 本地裸机
 pip install -r requirements-models.txt
-docker compose --profile models up model-puller     # 预热 /models 卷
+docker compose --profile models run --rm model-puller
 export RAG_STUB_MODE=false
 ```
 
-模型文件不进镜像（约 4.5 GB），由 `model-puller` 服务挂载到 `/models`。
+> **`WITH_MODELS=0` 的镜像里跑 `model-puller` 会明确报错退出 1**，不会假装成功。
+> 这是刻意的：一句"模型预下载完成"配上空的缓存目录，比直接报错难查得多。
+
+`WITH_MODELS` 是**构建期**参数（`ARG`），不是运行期环境变量——改它必须重新 build。
+`rag-core` 与 `model-puller` 必须用同一个值，否则会出现"模型下好了但 import 不了"。
 
 ## 目录
 
@@ -36,7 +53,7 @@ export RAG_STUB_MODE=false
 | `app/embedder.py` | bge-m3 / reranker 封装 + stub 实现。 |
 | `app/store.py` | Qdrant 访问 + `FixtureStore` 内存兜底。 |
 | `app/timeline.py` | 时区与"今天"的唯一来源。 |
-| `tests/fixtures/chunks.jsonl` | 12 条贴近真实的切片，含跨年度同题两条版本。 |
+| `tests/fixtures/chunks.jsonl` | 13 条贴近真实的切片，含跨年度同题两条版本。 |
 
 ## 三条不可改的行为
 
