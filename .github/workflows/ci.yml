@@ -6,13 +6,21 @@ name: CI
 # 这不是格式问题，必须回退或走 contract-change: PR 流程，不允许 --no-verify 绕过。
 
 on:
+  # 只在 main 上响应 push（合并后），分支上交给 pull_request。
+  # 原来的写法是 `push: branches: [main, "feat/**"]` + `pull_request`，
+  # 于是开 PR 的瞬间同一次提交会被跑两遍（push 一遍、pull_request 一遍），
+  # 三绿门槛变成六条 check，reviewer 不知道该看哪一组。
   push:
-    branches: [main, "feat/**"]
+    branches: [main]
   pull_request:
     branches: [main]
 
+# 同一 PR 连续推送时取消上一轮，避免排队堆积。
+# 注意 group 里用 head_ref 而不是 ref：pull_request 事件的 ref 是
+# refs/pull/N/merge（每个 PR 固定），push 事件的 ref 是 refs/heads/branch，
+# 两者对不上就会取消别的 PR 的构建。head_ref 在两种事件下都是分支名。
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 env:
