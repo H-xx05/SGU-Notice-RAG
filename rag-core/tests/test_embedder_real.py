@@ -41,6 +41,14 @@ def real_mode(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(settings, "rag_stub_mode", False)
 
 
+@pytest.fixture(autouse=True)
+def _reset_component_state():
+    """`_STATE` 是模块级单例，用例之间必须复位，否则顺序会影响结果。"""
+    embedder._STATE.update({"embedder": "idle", "reranker": "idle"})
+    yield
+    embedder._STATE.update({"embedder": "idle", "reranker": "idle"})
+
+
 class TestRealEmbedder:
     def test_dense_is_normalised_1024(self, real_mode, monkeypatch):
         monkeypatch.setattr(embedder, "_embedder", lambda: _FakeBGEM3())
@@ -97,20 +105,22 @@ class TestRealEmbedder:
         assert 0.0 <= embedder.rerank("转专业条件", ["转专业条件"])[0] <= 1.0
 
 
-class TestModelsReady:
-    def test_stub_mode_is_always_ready(self, monkeypatch):
-        monkeypatch.setattr(settings, "rag_stub_mode", True)
-        assert embedder.models_ready() == (True, True)
+class TestComponentsState:
+    """health 用的三态上报：ok / loading / down。"""
 
-    def test_missing_weights_report_not_ready(self, monkeypatch, tmp_path):
+    def test_stub_mode_is_always_ok(self, monkeypatch):
+        monkeypatch.setattr(settings, "rag_stub_mode", True)
+        assert embedder.components_state() == ("ok", "ok")
+
+    def test_missing_weights_report_down(self, monkeypatch, tmp_path):
         monkeypatch.setattr(settings, "rag_stub_mode", False)
         monkeypatch.setattr(settings, "model_cache_dir", str(tmp_path))
         monkeypatch.setattr(settings, "embedding_model", "BAAI/bge-m3")
         monkeypatch.setattr(settings, "reranker_model", "BAAI/bge-reranker-v2-m3")
-        assert embedder.models_ready() == (False, False)
+        assert embedder.components_state() == ("down", "down")
 
-    def test_hf_cache_layout_detected(self, monkeypatch, tmp_path):
-        """按 HuggingFace Hub 的缓存布局判断权重是否已下好。"""
+    def test_weights_present_but_not_loaded_is_loading(self, monkeypatch, tmp_path):
+        """权重在本地但还没加载 → loading（不是 ok，也不是 down）。"""
         for model in ("BAAI/bge-m3", "BAAI/bge-reranker-v2-m3"):
             snap = tmp_path / f"models--{model.replace('/', '--')}" / "snapshots" / "rev1"
             snap.mkdir(parents=True)
@@ -120,4 +130,12 @@ class TestModelsReady:
         monkeypatch.setattr(settings, "model_cache_dir", str(tmp_path))
         monkeypatch.setattr(settings, "embedding_model", "BAAI/bge-m3")
         monkeypatch.setattr(settings, "reranker_model", "BAAI/bge-reranker-v2-m3")
-        assert embedder.models_ready() == (True, True)
+        assert embedder.components_state() == ("loading", "loading")
+
+    def test_warmup_failure_stays_down_even_if_weights_present(self, monkeypatch, tmp_path):
+        """加载失败过一次就别再报 loading，否则排障时看不出"已经试过了"。"""
+        monkeypatch.setattr(settings, "rag_stub_mode", False)
+        monkeypatch.setattr(embedder, "model_available", lambda _m: True)
+        embedder._STATE["embedder"] = "down"
+        assert embedder.components_state()[0] == "down"
+

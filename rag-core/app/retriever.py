@@ -163,27 +163,36 @@ def _as_of_from(req: RetrieveRequest) -> date | None:
     return parse_iso_date(req.time_filter.as_of)
 
 
+def _normalise_state(state: str) -> str:
+    """把状态收敛到契约枚举。非法值一律按 down —— 宁可报红，也不报假绿。"""
+    return state if state in {"ok", "loading", "down"} else "down"
+
+
 def build_health(
     store: VectorStore,
     version: str,
     *,
-    embedder_ready: bool = True,
-    reranker_ready: bool | None = None,
+    embedder_state: str = "ok",
+    reranker_state: str | None = None,
 ) -> tuple[dict, bool]:
     """返回 (payload, http_ok)。
 
-    契约（docs/api.md §6.2）：任一组件 down → HTTP 503 + status=degraded。
+    契约（docs/api.md §6.2）：任一组件不是 ok → HTTP 503 + status=degraded。
+
+    三个状态而不是两个：`loading` 是契约 `ComponentState` 里本来就有的枚举，
+    真实模式启动后要几十秒加载 2.3 GB 权重，这段时间既不是 ok 也不是 down。
+    把它们混成 down 会让"刚启动"和"权重没下"看起来一样，排障的人得多猜一步。
 
     embedder 与 reranker 分开上报：两个模型是两次独立的加载，只报一个状态会让
     "embedder 好了、reranker 的权重没下完"这种半就绪状态显示成全绿。
     """
     qdrant_ok = store.ping()
-    if reranker_ready is None:
-        reranker_ready = embedder_ready
+    if reranker_state is None:
+        reranker_state = embedder_state
     components: dict[str, str] = {
         "qdrant": "ok" if qdrant_ok else "down",
-        "embedder": "ok" if embedder_ready else "down",
-        "reranker": "ok" if reranker_ready else "down",
+        "embedder": _normalise_state(embedder_state),
+        "reranker": _normalise_state(reranker_state),
     }
     ok = all(v == "ok" for v in components.values())
     return {

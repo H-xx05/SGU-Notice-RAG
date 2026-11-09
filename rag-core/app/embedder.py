@@ -27,6 +27,8 @@ import hashlib
 import logging
 import math
 import re
+import threading
+import time
 from functools import lru_cache
 from pathlib import Path
 
@@ -99,9 +101,27 @@ def _stub_sparse(text: str) -> tuple[list[int], list[float]]:
 # --------------------------------------------------------------------- 真实模型加载
 
 
+# 加载锁：预热线程与"第一个用户请求"可能同时到达。lru_cache 在并发未命中时
+# **会重复执行**被装饰的函数，两个线程各加载一份 2.3 GB 权重就是 OOM。
+# 这里用双检锁保证只加载一次；两把锁共用一个，让 embedder 与 reranker 串行加载，
+# 避免内存峰值翻倍。
+_LOAD_LOCK = threading.Lock()
+
+# 组件状态机：idle（还没开始）→ loading → ok / down。
+# 只在真实模式下有意义；stub 模式恒为 ok。
+_STATE: dict[str, str] = {"embedder": "idle", "reranker": "idle"}
+
+
+class ModelUnavailable(RuntimeError):
+    """模型未就绪（权重缺失或预热已失败）。
+
+    必须显式抛，不能"再试一次"：`lru_cache` **不缓存异常**，加载失败时每个请求都会
+    重新走一遍几十秒的加载，把一次故障放大成持续雪崩。预热已经判过死刑的，直接快速失败。
+    """
+
+
 @lru_cache(maxsize=1)
-def _embedder():
-    """真实模型懒加载：只有 RAG_STUB_MODE=false 才会走到这里。"""
+def _embedder_cached():
     from FlagEmbedding import BGEM3FlagModel  # 重量级依赖，延迟导入
 
     log.info("loading embedder %s (cache_dir=%s)", settings.embedding_model, settings.model_cache_dir)
@@ -113,7 +133,7 @@ def _embedder():
 
 
 @lru_cache(maxsize=1)
-def _reranker():
+def _reranker_cached():
     from FlagEmbedding import FlagReranker
 
     log.info("loading reranker %s (cache_dir=%s)", settings.reranker_model, settings.model_cache_dir)
@@ -122,6 +142,26 @@ def _reranker():
         use_fp16=settings.use_fp16,
         cache_dir=settings.model_cache_dir,
     )
+
+
+def _embedder():
+    """取 embedder；未加载时加锁加载（双检）。"""
+    if _STATE.get("embedder") == "down":
+        raise ModelUnavailable(f"embedder 未就绪（{settings.embedding_model}），见 /internal/health")
+    if _loaded(_embedder_cached):
+        return _embedder_cached()
+    with _LOAD_LOCK:
+        return _embedder_cached()
+
+
+def _reranker():
+    """取 reranker；未加载时加锁加载（双检）。"""
+    if _STATE.get("reranker") == "down":
+        raise ModelUnavailable(f"reranker 未就绪（{settings.reranker_model}），见 /internal/health")
+    if _loaded(_reranker_cached):
+        return _reranker_cached()
+    with _LOAD_LOCK:
+        return _reranker_cached()
 
 
 def _real_dense(text: str) -> list[float]:
@@ -238,15 +278,115 @@ def model_available(model_id: str) -> bool:
 
 
 def models_ready() -> tuple[bool, bool]:
-    """返回 `(embedder_ok, reranker_ok)`，供 `/internal/health` 如实上报。
+    """返回 `(embedder_ok, reranker_ok)` 的布尔形式（`components_state()` 的便捷包装）。
 
-    stub 模式下不加载任何模型，两个组件都算就绪（等价于骨架期的行为）。
+    仅用于"只想问一句行不行"的场合；`/internal/health` 需要区分 `loading`，用
+    `components_state()`。
+    """
+    embedder_state, reranker_state = components_state()
+    return embedder_state == "ok", reranker_state == "ok"
+
+
+def _component_state(name: str, loaded_fn, model_id: str) -> str:
+    """单组件三态：ok / loading / down。
+
+    判定顺序有讲究：
+    1. 已加载成功 → ok（最权威，不看别的信号）；
+    2. 预热被标记为 down → down（失败过就不要再假装 loading）；
+    3. 预热进行中 → loading；
+    4. 还没开始预热（idle）→ 权重在本地算 loading（马上就会加载），不在则 down。
+    """
+    if _loaded(loaded_fn):
+        return "ok"
+    state = _STATE.get(name, "idle")
+    if state == "down":
+        return "down"
+    if state == "loading":
+        return "loading"
+    return "loading" if model_available(model_id) else "down"
+
+
+def components_state() -> tuple[str, str]:
+    """`(embedder_state, reranker_state)`，直接喂给 `/internal/health`。
+
+    stub 模式不加载任何模型，两个组件恒为 ok（与骨架期行为一致）。
     """
     if settings.rag_stub_mode:
-        return True, True
-    embedder_ok = _loaded(_embedder) or model_available(settings.embedding_model)
-    reranker_ok = _loaded(_reranker) or model_available(settings.reranker_model)
-    return embedder_ok, reranker_ok
+        return "ok", "ok"
+    return (
+        _component_state("embedder", _embedder_cached, settings.embedding_model),
+        _component_state("reranker", _reranker_cached, settings.reranker_model),
+    )
+
+
+def warmup() -> None:
+    """把两个模型加载进内存，并各跑一次极短推理确认真的能用。
+
+    为什么必须预热：C 侧 `RAG_TIMEOUT_SECONDS=8`，而 bge-m3 在 CPU 上首次加载要几十秒。
+    不预热的话，**容器起来后第一个问题必然 50202 超时**——用户看到的是"服务坏了"，
+    实际上只是还没热。
+
+    为什么要跑一次推理而不只是加载：权重能读进来、但 tokenizer 缺文件或维度不匹配，
+    这类问题只有真跑一次才会暴露。宁可启动时在日志里炸，也不要等用户提问时炸。
+
+    失败不抛异常（本函数跑在后台线程里，抛了也没人接），只把状态置 down 并记日志；
+    `/internal/health` 会因此返回 503，人和 compose 都能看见。
+    """
+    if settings.rag_stub_mode:
+        return
+
+    targets = (
+        ("embedder", _embedder_cached, settings.embedding_model, _probe_embedder),
+        ("reranker", _reranker_cached, settings.reranker_model, _probe_reranker),
+    )
+    for name, loaded_fn, model_id, probe in targets:
+        if _loaded(loaded_fn):
+            _STATE[name] = "ok"
+            continue
+        if not model_available(model_id):
+            _STATE[name] = "down"
+            log.error(
+                "warmup %s skipped: %s 的权重不在 %s，先跑 model-puller",
+                name,
+                model_id,
+                settings.model_cache_dir,
+            )
+            continue
+
+        _STATE[name] = "loading"
+        started = time.perf_counter()
+        try:
+            probe()
+        except Exception:  # noqa: BLE001 - 后台线程里的任何异常都只降级，不抛出
+            _STATE[name] = "down"
+            log.exception("warmup %s failed after %.1fs", name, time.perf_counter() - started)
+        else:
+            _STATE[name] = "ok"
+            log.info("warmup %s ok in %.1fs", name, time.perf_counter() - started)
+
+
+def start_warmup() -> threading.Thread | None:
+    """在后台线程里预热，**不阻塞启动**。
+
+    必须是 daemon：容器收到 SIGTERM 时不能被一个正在加载 2.3 GB 权重的线程钉住，
+    否则 compose 只能等 10s 后 SIGKILL，优雅退出形同虚设。
+    """
+    if settings.rag_stub_mode:
+        return None
+    thread = threading.Thread(target=warmup, name="model-warmup", daemon=True)
+    thread.start()
+    log.info("model warmup started in background (stub_mode=false)")
+    return thread
+
+
+def _probe_embedder() -> None:
+    """最小可用性探测：一次稠密 + 一次稀疏，覆盖两条编码路径。"""
+    _real_dense("预热")
+    _real_sparse("预热")
+
+
+def _probe_reranker() -> None:
+    _real_rerank("预热", ["预热"])
 
 
 class EmbeddingInfo:

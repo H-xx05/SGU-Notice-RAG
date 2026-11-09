@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from . import __version__, time_filter
-from .embedder import models_ready
+from .embedder import ModelUnavailable, components_state, start_warmup
 from .retriever import build_health, retrieve
 from .schemas import RetrieveRequest, RetrieveResponse
 from .settings import settings
@@ -51,6 +51,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         settings.vector_db_url,
     )
     get_store()
+    # 后台预热模型，不阻塞启动：C 侧超时 8s，等模型加载完再 listen 会让网关先超时。
+    # 预热期间 /internal/health 会报 loading（503），compose 的 start_period 负责等它。
+    start_warmup()
     yield
     log.info("stopping rag-core")
 
@@ -68,13 +71,16 @@ app = FastAPI(
 
 @app.get("/internal/health")
 def health():
-    # 真实模式下 embedder / reranker 是两个独立加载的模型，各自上报就绪状态；
-    # stub 模式下 models_ready() 直接给 (True, True)，与骨架期行为一致。
-    embedder_ok, reranker_ok = models_ready()
+    # 真实模式下 embedder / reranker 是两个独立加载的模型，各自上报 ok/loading/down；
+    # stub 模式下 components_state() 直接给 ("ok","ok")，与骨架期行为一致。
+    embedder_state, reranker_state = components_state()
     payload, ok = build_health(
-        get_store(), __version__, embedder_ready=embedder_ok, reranker_ready=reranker_ok
+        get_store(),
+        __version__,
+        embedder_state=embedder_state,
+        reranker_state=reranker_state,
     )
-    # 契约要求：任一组件 down → HTTP 503 + status=degraded
+    # 契约要求：任一组件不是 ok → HTTP 503 + status=degraded
     return JSONResponse(status_code=200 if ok else 503, content=payload)
 
 
@@ -91,6 +97,14 @@ def retrieve_endpoint(req: RetrieveRequest) -> RetrieveResponse:
         log.error("vector store unavailable: %s", exc)
         return JSONResponse(  # type: ignore[return-value]
             status_code=503, content={"detail": "vector store unavailable"}
+        )
+    except ModelUnavailable as exc:
+        # 模型预热已判定失败（权重缺失 / 加载崩）。同样是"依赖未就绪"，503 而不是 500：
+        # 500 会让 C 归为后端 bug，503 才能让运维看到"是该去跑 model-puller 了"。
+        # 快速失败也很重要——lru_cache 不缓存异常，不拦住就会每个请求重试几十秒的加载。
+        log.error("model unavailable: %s", exc)
+        return JSONResponse(  # type: ignore[return-value]
+            status_code=503, content={"detail": "model unavailable"}
         )
     except Exception as exc:  # noqa: BLE001
         log.exception("retrieve failed")
