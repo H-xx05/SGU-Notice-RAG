@@ -17,7 +17,7 @@ from . import __version__, time_filter
 from .retriever import build_health, retrieve
 from .schemas import RetrieveRequest, RetrieveResponse
 from .settings import settings
-from .store import VectorStore, build_store
+from .store import VectorStore, VectorStoreUnavailable, build_store
 
 logging.basicConfig(
     level=logging.INFO if settings.is_production else logging.DEBUG,
@@ -79,6 +79,13 @@ def retrieve_endpoint(req: RetrieveRequest) -> RetrieveResponse:
     except ValueError as exc:
         # 参数越界（例如 range 缺日期）：这是调用方错误，400 而不是 500
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except VectorStoreUnavailable as exc:
+        # 契约里的 50301「依赖未就绪」：向量库不可用是**故障**，不是"没有命中"。
+        # 必须显式 5xx，否则 C 会把它当 no_hit 变成"未找到依据"的拒答。
+        log.error("vector store unavailable: %s", exc)
+        return JSONResponse(  # type: ignore[return-value]
+            status_code=503, content={"detail": "vector store unavailable"}
+        )
     except Exception as exc:  # noqa: BLE001
         log.exception("retrieve failed")
         return JSONResponse(status_code=500, content={"detail": f"retrieve failed: {exc}"})  # type: ignore[return-value]
