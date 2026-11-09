@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from . import __version__, time_filter
+from .embedder import models_ready
 from .retriever import build_health, retrieve
 from .schemas import RetrieveRequest, RetrieveResponse
 from .settings import settings
@@ -67,7 +68,12 @@ app = FastAPI(
 
 @app.get("/internal/health")
 def health():
-    payload, ok = build_health(get_store(), __version__)
+    # 真实模式下 embedder / reranker 是两个独立加载的模型，各自上报就绪状态；
+    # stub 模式下 models_ready() 直接给 (True, True)，与骨架期行为一致。
+    embedder_ok, reranker_ok = models_ready()
+    payload, ok = build_health(
+        get_store(), __version__, embedder_ready=embedder_ok, reranker_ready=reranker_ok
+    )
     # 契约要求：任一组件 down → HTTP 503 + status=degraded
     return JSONResponse(status_code=200 if ok else 503, content=payload)
 

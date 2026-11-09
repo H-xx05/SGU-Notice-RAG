@@ -163,16 +163,27 @@ def _as_of_from(req: RetrieveRequest) -> date | None:
     return parse_iso_date(req.time_filter.as_of)
 
 
-def build_health(store: VectorStore, version: str, *, embedder_ready: bool = True) -> tuple[dict, bool]:
+def build_health(
+    store: VectorStore,
+    version: str,
+    *,
+    embedder_ready: bool = True,
+    reranker_ready: bool | None = None,
+) -> tuple[dict, bool]:
     """返回 (payload, http_ok)。
 
     契约（docs/api.md §6.2）：任一组件 down → HTTP 503 + status=degraded。
+
+    embedder 与 reranker 分开上报：两个模型是两次独立的加载，只报一个状态会让
+    "embedder 好了、reranker 的权重没下完"这种半就绪状态显示成全绿。
     """
     qdrant_ok = store.ping()
+    if reranker_ready is None:
+        reranker_ready = embedder_ready
     components: dict[str, str] = {
         "qdrant": "ok" if qdrant_ok else "down",
         "embedder": "ok" if embedder_ready else "down",
-        "reranker": "ok" if embedder_ready else "down",
+        "reranker": "ok" if reranker_ready else "down",
     }
     ok = all(v == "ok" for v in components.values())
     return {
