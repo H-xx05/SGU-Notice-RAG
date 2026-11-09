@@ -98,7 +98,7 @@ curl -N "http://localhost:8088/api/v1/chat/stream?q=2026年转专业报名截止
 | `VECTOR_DB_URL` | `http://qdrant:6333` | Qdrant 地址 | B / A |
 | `SCRAPER_MAX_PAGES` | `50` | 单次采集最多翻多少页**列表页**（详情页不计入） | A |
 | `SCRAPER_DELAY_SECONDS` | `1.0` | 每次请求间隔，**下限 1 秒**，配更低会被压回 1.0（不是报错，是不给你更快） | A |
-| `VITE_USE_MOCK` | `true` | 前端是否走本地 Mock（`true` 时零后端可跑） | D |
+| `VITE_USE_MOCK` | `false` | 前端是否走本地 Mock。**compose 场景默认关**（后端齐备，开 Mock 会显示假数据）；`pnpm dev` 另有自己的默认值 `true` | D |
 
 上表是元提示词冻结的五个变量名。采集侧另有正式长名（`SCRAPER_MAX_PAGES_PER_RUN`、
 `SCRAPER_REQUEST_DELAY_SECONDS`）与第四道闸门 `SCRAPER_MAX_REQUESTS_PER_RUN`（含详情页与重试，硬顶 2000），

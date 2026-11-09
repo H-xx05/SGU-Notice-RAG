@@ -35,10 +35,10 @@ cp .env.example .env          # 默认 RAG_STUB_MODE=true、WITH_MODELS=0
 docker compose up -d --build
 docker compose ps             # 7 个常驻服务 running，加 qdrant-init（Exited 0）
 
-curl -s http://localhost:8088/healthz
+curl -s http://127.0.0.1:8088/healthz
 ```
 
-浏览器打开 <http://localhost:8088>。
+浏览器打开 <http://127.0.0.1:8088>。
 
 ### 2.2 切到真实检索（可选，约 +5 GB 下载）
 
@@ -61,11 +61,27 @@ sed -i 's/^RAG_STUB_MODE=true/RAG_STUB_MODE=false/' .env
 docker compose up -d rag-core
 
 # 4) 确认三个组件都真的 ok（不是 stub）
-curl -s http://localhost:8000/internal/health | python -m json.tool
+#    注意必须 exec 进容器：rag-core 不映射宿主机端口，宿主机直接 curl 是连不上的
+docker compose exec rag-core curl -s http://127.0.0.1:8000/internal/health | python -m json.tool
 ```
 
 > `model-puller` 在 `WITH_MODELS=0` 的镜像里会**明确报错并退出 1**，不会假装成功。
 > 这是刻意的：一句"模型预下载完成"配上 0 字节的缓存目录，比直接报错难查得多。
+
+#### stub 模式下问什么都会拒答，这是预期的
+
+stub 模式用**词表重合度**模拟 reranker，分数值域和真实的 bge-reranker 完全不同：
+`_stub_rerank_score()` 返回 `|query ∩ doc| / sqrt(|query| · |doc|)`，文档动辄几百字，
+所以 stub 分**上界约 0.27**；而 C 的 `MinAnswerScore = 0.35`
+（`api-server/internal/handler/handler.go:31`）是给真实 reranker 标定的。
+
+实测 `eval/dataset/queries.jsonl` 的 12 条问句，stub 模式下只有 1 条（q05）能过 0.35，
+其余 11 条全部落进 `refuse_reason: "low_score"`。
+
+**不要为此调低 `MinAnswerScore`。** 0.35 是真实模式的口径，调低它会让真实模式开始
+用低质量片段硬答，而这正是本项目要消灭的幻觉。stub 模式下判断"链路是否通"，
+看的是 `retrieval.candidates > 0`（说明过滤 + 召回 + RRF + 降权都跑过了），
+不是 `refused == false`。要验证真实问答质量，必须按 §2.2 切到真实模型。
 
 ### 2.3 首次启动要多久
 
@@ -158,7 +174,7 @@ location /api/ {
 | `SCRAPER_ENTRY_URL` | `https://www.sgu.edu.cn/jwb/jxtz.htm` | A | 唯一入口，锁定单栏目，不递归 |
 | `SCRAPER_USER_AGENT` | `SGU-Notice-RAG/dev (student project)` | A | 标识自己，不做伪装 |
 | `INGESTION_DATA_DIR` | `ingestion/data` | A | `chunks.jsonl` 与原始 HTML 的落地目录 |
-| `VITE_USE_MOCK` | `true` | D | `true` 时前端走 Mock，零后端 |
+| `VITE_USE_MOCK` | `false` | D | **只影响 `docker compose build` 出来的前端产物**（Vite 构建期内联）。默认 `false`：compose 把后端全起起来了，前端再挂 Mock 就是"容器全健康、页面正常、数据全假"。本地 `pnpm dev` 走 `frontend/.env.development` 的 `true`，与此无关 |
 | `VITE_API_BASE_URL` | `/api` | D | **不得**写死 `http://localhost:8080` |
 | `EVAL_DATASET` | `eval/dataset/queries.jsonl` | E | 评估集路径 |
 | `EVAL_OUTPUT_DIR` | `eval/report` | E | 跑批报告落地目录 |
@@ -176,11 +192,14 @@ location /api/ {
 | `/healthz` 502 | api-server 未起 | `docker compose ps` 看状态；端口占用 → 改 `.env` 的 `API_PORT` |
 | SSE 只出 `meta` 就断 | Nginx 缓冲 | 确认 `proxy_buffering off`、`X-Accel-Buffering: no` |
 | `rag-core` 启动即退出 | 模型未下载 + 无网 | 设置 `RAG_STUB_MODE=true` 用假向量跑通链路 |
-| 前端白屏 | `VITE_USE_MOCK=false` 但 API 未起 | 改回 `true` 或先起后端 |
+| 前端白屏 | `VITE_USE_MOCK=false` 但 API 未起 | 改回 `true` 重新 build，或先起后端 |
+| 页面能开但数据对不上 / 接口没被调用 | compose 构建时 `VITE_USE_MOCK=true`，前端在跑 Mock | 确认 `.env` 里 `VITE_USE_MOCK=false` 后 **`docker compose build frontend`**（Vite 构建期内联，重启容器无效） |
 | 采集 403 / 页面标题是 `block` | 官网 WAF 拦截非浏览器请求（**已实测，见 §5.1**） | 不要加重试、不要缩短延时；改用浏览器手动确认或走校内授权渠道 |
 | 采集超时（非 403） | 网络抖动或对方限速 | 提高 `SCRAPER_REQUEST_DELAY_SECONDS`，降低 `SCRAPER_MAX_PAGES_PER_RUN` |
 | 端口被占用 | 本机已有服务 | 改 `.env` 的宿主机端口（nginx 8088 / api 8080） |
 | `cli crawl` 退出码 4 | 判定为 WAF 拦截（`BlockedError`） | 见 §5.1，**这不是代码 bug** |
+| `frontend` 一直 unhealthy，`nginx` 停在 `Created` | healthcheck 写了 `localhost`，Alpine 解析成 `::1`，nginx 只听 IPv4 | 见 §8.2；healthcheck 一律写 `127.0.0.1` |
+| `candidates` 有值但永远 `refused: true` | stub 模式分数上界约 0.27，够不到 `MinAnswerScore=0.35` | 见 §2.2 末；**不要调低阈值**，切真实模型或只看 `candidates > 0` |
 
 ### 5.1 关于官网 403（已实测，2026-11）
 
@@ -237,22 +256,24 @@ cd eval && pip install -e . && python -m eval.runner --dataset dataset/queries.j
 
 **能自动化验证的**（不需要 daemon，CI 里跑）：
 
-- [ ] `docker compose config -q` 退出码 0
-- [ ] `docker compose config --services` → 7 个常驻服务 + `qdrant-init`
-- [ ] `python infra/scripts/test-init-qdrant.py` → 幂等 / 索引齐全 / 失败非 0，三项全过
-- [ ] `bash .claude/skills/sgu-notice-rag-dev/scripts/check-contract.sh` 退出码 0
+- [x] `docker compose config -q` 退出码 0
+- [x] `docker compose config --services` → 7 个常驻服务 + `qdrant-init`
+- [x] `python infra/scripts/test-init-qdrant.py` → 幂等 / 索引齐全 / 失败非 0，三项全过
+- [x] `bash .claude/skills/sgu-notice-rag-dev/scripts/check-contract.sh` 退出码 0
 
 **只能在有 daemon 的机器上验证的**（F 必须亲手做过一次）：
 
-- [ ] `docker compose up -d --build` 后 7 个常驻容器全部 `running`，`qdrant-init` 为 `Exited (0)`
-- [ ] `docker compose logs qdrant-init` 里六条 `✓ index ...` 齐全
-- [ ] `curl localhost:8088/healthz` 返回 `{"code":0,...}`
-- [ ] `curl "localhost:8088/api/v1/notices?page=1&page_size=1"` 返回 `code:0`
-- [ ] 浏览器打开 `localhost:8088` 看到列表页
-- [ ] `curl -N "localhost:8088/api/v1/chat/stream?q=test&token=<jwt>"` 依次收到 `meta`/`sources`/`delta`/`done`
-- [ ] `docker compose down && docker compose up -d` 数据不丢（volume 生效），且**不重建 collection**
-- [ ] `docker compose exec rag-core curl -s localhost:8000/internal/health` → 三组件 `ok`
-- [ ] 从宿主机 `curl localhost:8000/internal/health` **应当连不上**（`rag-core` 不映射端口）
+- [x] `docker compose up -d --build` 后 7 个常驻容器全部 `running`，`qdrant-init` 为 `Exited (0)`
+- [x] `docker compose logs qdrant-init` 里六条 `✓ index ...` 齐全
+- [x] `curl 127.0.0.1:8088/healthz` 返回 `{"code":0,...}`
+- [x] `curl "127.0.0.1:8088/api/v1/notices?page=1&page_size=1"` 返回 `code:0`
+- [x] 浏览器打开 `127.0.0.1:8088` 看到列表页（首页 HTML 与 `/notices` SPA 回落均 200）
+- [x] `curl -N "127.0.0.1:8088/api/v1/chat/stream?q=test&token=<jwt>"` 依次收到 `meta`/`sources`/`delta`/`done`
+- [x] `docker compose down && docker compose up -d` 数据不丢（volume 生效），且**不重建 collection**
+- [x] `docker compose exec rag-core curl -s 127.0.0.1:8000/internal/health` → 三组件 `ok`
+- [x] 从宿主机 `curl 127.0.0.1:8000/internal/health` **连不上**（`rag-core` 不映射端口，实测 HTTP 000）
+
+> 上面九条已于 2026-11-09 在本机 Docker Desktop 29.9.2 上实跑通过，结果见 PR #7 说明。
 
 ### 8.1 逐条命令（复制粘贴用）
 
@@ -265,14 +286,25 @@ python infra/scripts/test-init-qdrant.py
 # 起来之后
 docker compose ps
 docker compose logs qdrant-init | grep '✓ index' | wc -l     # 应为 6
-curl -s localhost:8088/healthz | python -m json.tool
-curl -s "localhost:8088/api/v1/notices?page=1&page_size=1"
+curl -s 127.0.0.1:8088/healthz | python -m json.tool
+curl -s "127.0.0.1:8088/api/v1/notices?page=1&page_size=1"
 
 # 内网边界：这条应当失败（connection refused / 超时）
-curl -s --max-time 3 localhost:8000/internal/health || echo "✓ 未从宿主机暴露（正确）"
+curl -s --max-time 3 127.0.0.1:8000/internal/health || echo "✓ 未从宿主机暴露（正确）"
 
 # 幂等：再 up 一次，collection 不能被重建
 docker compose up -d
 docker compose logs qdrant-init | tail -3        # 应出现"已存在，跳过创建"
 ```
+
+### 8.2 healthcheck 一律写 `127.0.0.1`，不要写 `localhost`
+
+Alpine 容器的 `/etc/hosts` 同时把 `localhost` 指向 `127.0.0.1` 和 `::1`，解析器
+**优先返回 `::1`**，而 nginx 默认只监听 IPv4 `0.0.0.0:80`。于是
+`wget -qO- http://localhost/` 在容器内报 `Connection refused`，healthcheck 永远失败，
+`frontend` 卡在 unhealthy，`nginx` 因依赖未满足而根本不启动 —— 现象是"页面打不开"，
+但日志里只有一句 wget 连接被拒，和 nginx 毫无关系。
+
+Go（api-server）和 uvicorn（rag-core）默认双栈绑定，写 `localhost` 也能通，
+但四处 healthcheck 统一写 `127.0.0.1`，避免以后有人照抄时踩同一个坑。
 

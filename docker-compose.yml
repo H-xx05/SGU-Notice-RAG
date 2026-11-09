@@ -21,7 +21,10 @@ services:
       frontend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/healthz"]
+      # 用 127.0.0.1 而不是 localhost：Alpine 容器的 /etc/hosts 里
+      # localhost 同时对应 127.0.0.1 和 ::1，解析器会优先给 ::1，
+      # 而 nginx 默认只监听 IPv4，于是探针拿到 Connection refused。
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
       interval: 15s
       timeout: 3s
       retries: 5
@@ -33,14 +36,20 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       # Vite 在 build 期内联环境变量，运行期设置无效 —— 必须是 build args
+      #
+      # 默认 **false**：这套 compose 把后端全起起来了，前端再挂 Mock 就成了
+      # "容器全 healthy、页面也正常、但显示的是假数据" —— 最难查的一类假成功。
+      # Vite 的 env 优先级是 process.env > .env 文件，所以这个 ARG 会盖过
+      # frontend/.env.production 里的 false；`pnpm dev` 不受影响（走 .env.development）。
       args:
-        VITE_USE_MOCK: ${VITE_USE_MOCK:-true}
+        VITE_USE_MOCK: ${VITE_USE_MOCK:-false}
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
     container_name: sgu-frontend
     ports:
       - "5173:80"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      # 同上：必须写 127.0.0.1，写 localhost 会被解析成 ::1 而 nginx 只听 IPv4。
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
       interval: 15s
       timeout: 3s
       retries: 5
@@ -76,7 +85,9 @@ services:
       rag-core:
         condition: service_started
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      # 统一写 127.0.0.1：Go 默认双栈监听，localhost 目前也能通，
+      # 但和 frontend/nginx 保持一致，避免以后再踩 IPv6 优先解析的坑。
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
       interval: 15s
       timeout: 3s
       retries: 10
@@ -110,7 +121,7 @@ services:
     # **不映射到宿主机**：`/internal/*` 是内部接口，只有 C 该调用它。
     # 映射成 8000:8000 会让它绕过 nginx 直接出网，`infra/nginx/default.conf`
     # 里那句 `location /internal/ { return 404; }` 也就形同虚设。
-    # 需要本地调试时：docker compose exec rag-core curl -s localhost:8000/internal/health
+    # 需要本地调试时：docker compose exec rag-core curl -s 127.0.0.1:8000/internal/health
     expose:
       - "8000"
     depends_on:
@@ -121,7 +132,8 @@ services:
       qdrant-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/internal/health').status==200 else 1)"]
+      # 同一原因：uvicorn 默认双栈，但统一用 127.0.0.1。
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/internal/health').status==200 else 1)"]
       interval: 20s
       timeout: 5s
       retries: 10
