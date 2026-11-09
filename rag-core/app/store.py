@@ -12,14 +12,25 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from .embedder import DENSE_VECTOR_NAME, SPARSE_VECTOR_NAME
 from .schemas import Chunk
 from .settings import settings
 
 log = logging.getLogger(__name__)
+
+
+class VectorStoreUnavailable(RuntimeError):
+    """向量库两路召回都失败。
+
+    必须抛出来，不能返回空列表：空列表在 C 侧等于 `no_hit` → 拒答话术"未找到依据"。
+    把"向量库挂了"伪装成"没有这条通知"，正是本项目要消灭的那类幻觉——
+    只不过这次骗的是运维，不是用户。
+    """
 
 
 @dataclass
@@ -46,18 +57,95 @@ class VectorStore(Protocol):
 
 # --------------------------------------------------------------------------- Qdrant
 
+# payload_filter 里的日期边界形如 `2026-11-08`（也兼容带时间的 RFC3339）。
+# Qdrant 的 range 分两种模型：`Range` 只吃数值，日期必须用 `DatetimeRange`。
+# 骨架期用 `models.Filter(**payload_filter)` 直接塞 dict，pydantic 会"猜"成 DatetimeRange，
+# 但只要字段名或取值形态稍有偏差（例如数值型 doc_version_rank），就会静默选错类型。
+# 因此这里显式按取值形态分派，规则可读、可测，不依赖 union 的匹配顺序。
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _is_date_bound(rng: dict[str, Any]) -> bool:
+    return any(isinstance(v, str) and _ISO_DATE_RE.match(v) for v in rng.values())
+
+
+def _condition(models: Any, cond: dict[str, Any]) -> Any | None:
+    """把 time_filter 产出的条件 dict 翻译成 Qdrant 的 condition 对象。
+
+    只支持本项目实际用到的三种形态，其余返回 None（忽略而不是报错）：
+      `{"key": K, "range": {...}}`   区间，日期走 DatetimeRange、数值走 Range
+      `{"is_empty": {"key": K}}`     K 为 null 或缺失（长期有效）
+    """
+    if "is_empty" in cond:
+        key = (cond["is_empty"] or {}).get("key")
+        if not key:
+            return None
+        return models.IsEmptyCondition(is_empty=models.PayloadField(key=key))
+
+    key = cond.get("key")
+    if not key:
+        return None
+
+    if "range" in cond:
+        rng = {k: v for k, v in (cond["range"] or {}).items() if v is not None}
+        if not rng:
+            return None
+        if _is_date_bound(rng):
+            return models.FieldCondition(key=key, range=models.DatetimeRange(**rng))
+        return models.FieldCondition(
+            key=key, range=models.Range(**{k: float(v) for k, v in rng.items()})
+        )
+
+    if "match" in cond:
+        return models.FieldCondition(key=key, match=models.MatchValue(**(cond["match"] or {})))
+
+    return None
+
+
+def build_qdrant_filter(payload_filter: dict | None) -> Any | None:
+    """dict 形态的 payload filter → `models.Filter`。
+
+    保留 `must` / `should` / `must_not` 三组语义（`should` 在本项目里专门用来兜住
+    "effective_to IS NULL"，删掉或降级成 `must` 都会让长期有效的规定整条消失）。
+    """
+    if not payload_filter:
+        return None
+
+    from qdrant_client import models
+
+    def translate(name: str) -> list[Any] | None:
+        raw = payload_filter.get(name) or []
+        out = [c for c in (_condition(models, cond) for cond in raw) if c is not None]
+        if len(out) != len(raw):
+            log.warning("payload_filter.%s 有 %d 条条件无法翻译，已忽略", name, len(raw) - len(out))
+        return out or None
+
+    return models.Filter(
+        must=translate("must"),
+        should=translate("should"),
+        must_not=translate("must_not"),
+    )
+
 
 class QdrantStore:
-    """真实向量库。检索分两路（dense / sparse），各自取 topN，融合在 retriever 里做。"""
+    """真实向量库。检索分两路（dense / sparse），各自取 topN，融合在 retriever 里做。
 
-    def __init__(self) -> None:
-        from qdrant_client import QdrantClient
+    用 `query_points` 而不是 `search`：`search` 在 qdrant-client 1.13 起标废弃、
+    1.15 移除。项目锁 1.12.1，两个都能用，但选不会在下一次升级时爆炸的那个。
+    """
 
-        self._client = QdrantClient(
-            url=settings.vector_db_url,
-            api_key=settings.qdrant_api_key or None,
-            timeout=10,
-        )
+    def __init__(self, client: Any | None = None) -> None:
+        if client is None:
+            from qdrant_client import QdrantClient
+
+            client = QdrantClient(
+                url=settings.vector_db_url,
+                api_key=settings.qdrant_api_key or None,
+                timeout=10,
+            )
+        # client 可注入：测试用 `QdrantClient(location=":memory:")` 跑真实过滤语义，
+        # 既不需要容器也不需要网络，还比 mock 更能证明"is_empty 分支真的生效"。
+        self._client = client
         self._collection = settings.qdrant_collection
 
     def ping(self) -> bool:
@@ -66,6 +154,24 @@ class QdrantStore:
         except Exception:  # noqa: BLE001 - 健康检查不应该抛
             log.warning("qdrant ping failed", exc_info=True)
             return False
+
+    def _query(
+        self,
+        *,
+        vector: Any,
+        using: str,
+        payload_filter: Any | None,
+        limit: int,
+    ) -> list[Any]:
+        resp = self._client.query_points(
+            collection_name=self._collection,
+            query=vector,
+            using=using,
+            query_filter=payload_filter,
+            limit=limit,
+            with_payload=True,
+        )
+        return list(resp.points)
 
     def hybrid_search(
         self,
@@ -77,20 +183,18 @@ class QdrantStore:
     ) -> list[Scored]:
         from qdrant_client import models
 
-        flt = models.Filter(**payload_filter) if payload_filter else None
+        flt = build_qdrant_filter(payload_filter)
         out: dict[str, Scored] = {}
+        failures: list[str] = []
 
         try:
-            dense_hits = self._client.search(
-                collection_name=self._collection,
-                query_vector=models.NamedVector(name="dense", vector=dense),
-                query_filter=flt,
-                limit=limit,
-                with_payload=True,
+            dense_hits = self._query(
+                vector=dense, using=DENSE_VECTOR_NAME, payload_filter=flt, limit=limit
             )
         except Exception:  # noqa: BLE001
             log.warning("dense search failed", exc_info=True)
             dense_hits = []
+            failures.append("dense")
 
         for h in dense_hits:
             ch = _chunk_from_payload(h.payload or {})
@@ -99,19 +203,16 @@ class QdrantStore:
         indices, values = sparse
         if indices:
             try:
-                sparse_hits = self._client.search(
-                    collection_name=self._collection,
-                    query_vector=models.NamedSparseVector(
-                        name="sparse",
-                        vector=models.SparseVector(indices=indices, values=values),
-                    ),
-                    query_filter=flt,
+                sparse_hits = self._query(
+                    vector=models.SparseVector(indices=indices, values=values),
+                    using=SPARSE_VECTOR_NAME,
+                    payload_filter=flt,
                     limit=limit,
-                    with_payload=True,
                 )
             except Exception:  # noqa: BLE001
                 log.warning("sparse search failed", exc_info=True)
                 sparse_hits = []
+                failures.append("sparse")
 
             for h in sparse_hits:
                 ch = _chunk_from_payload(h.payload or {})
@@ -119,6 +220,11 @@ class QdrantStore:
                     out[ch.chunk_id].sparse_score = float(h.score)
                 else:
                     out[ch.chunk_id] = Scored(chunk=ch, sparse_score=float(h.score))
+
+        if len(failures) == 2:
+            raise VectorStoreUnavailable(
+                f"qdrant 两路召回均失败（collection={self._collection}）: {', '.join(failures)}"
+            )
 
         return list(out.values())
 
