@@ -20,26 +20,62 @@
 
 ---
 
-## 2. 从零到可访问（五步）
+## 2. 从零到可访问
+
+### 2.1 最快路径（stub 模式，不要模型，约 3 分钟）
+
+干净机器上**第一步只求能打开页面**。stub 模式不加载任何模型，用确定性哈希向量跑通
+整条链路（过滤 → 召回 → RRF → 降权 → 拒答），契约与真实模式完全一致。
 
 ```bash
-# 1) 取代码
 git clone <repo-url> sgu-notice-rag && cd sgu-notice-rag
 
-# 2) 生成配置
-cp .env.example .env
-#    默认值即可跑通；如需改端口/密钥，编辑 .env
+cp .env.example .env          # 默认 RAG_STUB_MODE=true、WITH_MODELS=0
 
-# 3) 拉取模型（首次约 2.3 GB，建议先跑；失败可跳过，rag-core 会以 stub 模式启动）
-docker compose --profile models run --rm model-puller
-
-# 4) 启动
 docker compose up -d --build
+docker compose ps             # 7 个常驻服务 running，加 qdrant-init（Exited 0）
 
-# 5) 验证
-curl -s http://localhost:8088/api/v1/notices?page=1\&page_size=1 | head -c 300; echo
 curl -s http://localhost:8088/healthz
 ```
+
+浏览器打开 <http://localhost:8088>。
+
+### 2.2 切到真实检索（可选，约 +5 GB 下载）
+
+真实检索要两样东西，**两样都必须有**，缺一个就起不来：
+
+| 要什么 | 怎么给 |
+|---|---|
+| 模型的**依赖库**（torch + FlagEmbedding，4.5 GB） | 构建时 `WITH_MODELS=1` |
+| 模型的**权重**（bge-m3 + reranker，2.3 GB） | `model-puller` 下到 `model-cache` 卷 |
+
+```bash
+# 1) 带模型依赖重建（两个服务必须同一个 WITH_MODELS）
+WITH_MODELS=1 docker compose build rag-core model-puller
+
+# 2) 预下载权重到卷
+WITH_MODELS=1 docker compose --profile models run --rm model-puller
+
+# 3) 打开真实模式并重启
+sed -i 's/^RAG_STUB_MODE=true/RAG_STUB_MODE=false/' .env
+docker compose up -d rag-core
+
+# 4) 确认三个组件都真的 ok（不是 stub）
+curl -s http://localhost:8000/internal/health | python -m json.tool
+```
+
+> `model-puller` 在 `WITH_MODELS=0` 的镜像里会**明确报错并退出 1**，不会假装成功。
+> 这是刻意的：一句"模型预下载完成"配上 0 字节的缓存目录，比直接报错难查得多。
+
+### 2.3 首次启动要多久
+
+| 阶段 | stub 模式 | 真实模式 |
+|---|---|---|
+| 拉基础镜像（首次） | 1–2 分钟 | 1–2 分钟 |
+| 构建 3 个自建镜像 | 1–2 分钟 | +3–5 分钟（torch 编译/下载） |
+| 起服务到全 healthy | 30 秒 | +30–60 秒（加载模型） |
+
+`rag-core` 的 healthcheck 有 `start_period: 120s`，真实模式下首次加载模型不会让它反复重启。
 
 浏览器打开 <http://localhost:8088> 应看到通知列表页。
 
@@ -55,7 +91,8 @@ curl -s http://localhost:8088/healthz
 | `nginx` | 80 | **8088** | nginx:1.27-alpine | `GET /healthz` | **统一入口** |
 | `frontend` | 80 | 5173 | 本地构建 | `GET /` | dev 模式直连（`VITE_USE_MOCK=true`） |
 | `api-server` | 8080 | 8080 | 本地构建（Go） | `GET /healthz` | 对外 REST |
-| `rag-core` | 8000 | 8000 | 本地构建（Python） | `GET /internal/health` | **只在内网** |
+| `rag-core` | 8000 | — （不映射） | 本地构建（Python） | `GET /internal/health` | **只在内网**，`expose` 而非 `ports` |
+| `qdrant-init` | — | — （一次性） | curlimages/curl | 退出码 0 | 建 collection 与 payload 索引，跑完即退 |
 | `qdrant` | 6333 / 6334 | 6333 | qdrant/qdrant:v1.12 | `GET /healthz` | 向量库 |
 | `postgres` | 5432 | 5432 | postgres:16-alpine | `pg_isready` | 关系库 |
 | `redis` | 6379 | 6379 | redis:7-alpine | `redis-cli ping` | 限流 |
@@ -112,7 +149,8 @@ location /api/ {
 | `EMBED_MODEL` | `BAAI/bge-m3` | B | 嵌入模型 |
 | `RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | B | 重排模型 |
 | `RAG_TOP_K` | `20` | B | 召回后送入 rerank 的条数（别名 `RERANK_TOP_K`） |
-| `RAG_STUB_MODE` | `false` | B | `true` 时不加载模型，用确定性假向量跑通链路（**仅开发与 CI**，答案质量无意义） |
+| `RAG_STUB_MODE` | `true` | B | `true` 时不加载模型，用确定性假向量跑通链路（**干净机器默认值**，答案质量无意义）。改 `false` 前必须先做 `WITH_MODELS=1` 构建 + 模型预下载，否则启动即崩 |
+| `WITH_MODELS` | `0` | B/F | **构建参数**（不是运行期变量）：`1` 才把 torch + FlagEmbedding（约 4.5 GB）装进镜像。`rag-core` 与 `model-puller` 必须用同一个值 |
 | `SCRAPER_ALLOWED_DOMAINS` | `sgu.edu.cn` | A | 域名白名单（逗号分隔），**只接受默认白名单的子集** |
 | `SCRAPER_REQUEST_DELAY_SECONDS` | `1.0` | A | 请求间隔。**下限 1**，更低的值被压回 1（别名 `SCRAPER_DELAY_SECONDS`） |
 | `SCRAPER_MAX_PAGES_PER_RUN` | `50` | A | 单次**列表页**上限，不是总请求数（别名 `SCRAPER_MAX_PAGES`） |
@@ -139,12 +177,12 @@ location /api/ {
 | SSE 只出 `meta` 就断 | Nginx 缓冲 | 确认 `proxy_buffering off`、`X-Accel-Buffering: no` |
 | `rag-core` 启动即退出 | 模型未下载 + 无网 | 设置 `RAG_STUB_MODE=true` 用假向量跑通链路 |
 | 前端白屏 | `VITE_USE_MOCK=false` 但 API 未起 | 改回 `true` 或先起后端 |
-| 采集 403 / 页面标题是 `block` | 官网 WAF 拦截非浏览器请求（**已实测，见 §排障 8**） | 不要加重试、不要缩短延时；改用浏览器手动确认或走校内授权渠道 |
+| 采集 403 / 页面标题是 `block` | 官网 WAF 拦截非浏览器请求（**已实测，见 §5.1**） | 不要加重试、不要缩短延时；改用浏览器手动确认或走校内授权渠道 |
 | 采集超时（非 403） | 网络抖动或对方限速 | 提高 `SCRAPER_REQUEST_DELAY_SECONDS`，降低 `SCRAPER_MAX_PAGES_PER_RUN` |
 | 端口被占用 | 本机已有服务 | 改 `.env` 的宿主机端口（nginx 8088 / api 8080） |
-| `cli crawl` 退出码 4 | 判定为 WAF 拦截（`BlockedError`） | 见下方第 8 条，**这不是代码 bug** |
+| `cli crawl` 退出码 4 | 判定为 WAF 拦截（`BlockedError`） | 见 §5.1，**这不是代码 bug** |
 
-### 8. 关于官网 403（已实测，2026-11）
+### 5.1 关于官网 403（已实测，2026-11）
 
 `https://www.sgu.edu.cn/**` 对非浏览器发起的请求统一返回 **HTTP 403 + `<title>block</title>`** 的拦截页
 （约 47 KB，页面里没有任何通知链接）。自定义 UA、完整浏览器 UA + Accept 头、curl、首页/栏目页/列表页
@@ -197,9 +235,44 @@ cd eval && pip install -e . && python -m eval.runner --dataset dataset/queries.j
 
 ## 8. 从零到可访问的验收清单（F 自查）
 
-- [ ] `docker compose up -d --build` 后 7 个容器全部 `running`
+**能自动化验证的**（不需要 daemon，CI 里跑）：
+
+- [ ] `docker compose config -q` 退出码 0
+- [ ] `docker compose config --services` → 7 个常驻服务 + `qdrant-init`
+- [ ] `python infra/scripts/test-init-qdrant.py` → 幂等 / 索引齐全 / 失败非 0，三项全过
+- [ ] `bash .claude/skills/sgu-notice-rag-dev/scripts/check-contract.sh` 退出码 0
+
+**只能在有 daemon 的机器上验证的**（F 必须亲手做过一次）：
+
+- [ ] `docker compose up -d --build` 后 7 个常驻容器全部 `running`，`qdrant-init` 为 `Exited (0)`
+- [ ] `docker compose logs qdrant-init` 里六条 `✓ index ...` 齐全
 - [ ] `curl localhost:8088/healthz` 返回 `{"code":0,...}`
 - [ ] `curl "localhost:8088/api/v1/notices?page=1&page_size=1"` 返回 `code:0`
 - [ ] 浏览器打开 `localhost:8088` 看到列表页
 - [ ] `curl -N "localhost:8088/api/v1/chat/stream?q=test&token=<jwt>"` 依次收到 `meta`/`sources`/`delta`/`done`
-- [ ] `docker compose down && docker compose up -d` 数据不丢（volume 生效）
+- [ ] `docker compose down && docker compose up -d` 数据不丢（volume 生效），且**不重建 collection**
+- [ ] `docker compose exec rag-core curl -s localhost:8000/internal/health` → 三组件 `ok`
+- [ ] 从宿主机 `curl localhost:8000/internal/health` **应当连不上**（`rag-core` 不映射端口）
+
+### 8.1 逐条命令（复制粘贴用）
+
+```bash
+# 静态校验（无 daemon 也能跑）
+docker compose config -q && echo "compose OK"
+docker compose config --services | sort
+python infra/scripts/test-init-qdrant.py
+
+# 起来之后
+docker compose ps
+docker compose logs qdrant-init | grep '✓ index' | wc -l     # 应为 6
+curl -s localhost:8088/healthz | python -m json.tool
+curl -s "localhost:8088/api/v1/notices?page=1&page_size=1"
+
+# 内网边界：这条应当失败（connection refused / 超时）
+curl -s --max-time 3 localhost:8000/internal/health || echo "✓ 未从宿主机暴露（正确）"
+
+# 幂等：再 up 一次，collection 不能被重建
+docker compose up -d
+docker compose logs qdrant-init | tail -3        # 应出现"已存在，跳过创建"
+```
+

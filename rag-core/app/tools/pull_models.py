@@ -25,20 +25,33 @@ from ..settings import get_settings
 
 
 def _download(model_id: str, cache_dir: str) -> bool:
-    """优先用 huggingface_hub；没装就退化为 FlagEmbedding 的自动下载提示。"""
+    """下载一个模型。**任何没能真正下载成功的情况都必须返回 False。**
+
+    这里曾经有个坑：huggingface_hub 没装时返回 True（"跳过预下载"），
+    于是 `main()` 打印"模型预下载完成，可以设 RAG_STUB_MODE=false 了"，
+    退出码 0 —— 而实际上一份权重都没有。照这句话去关 stub，
+    rag-core 会在 import FlagEmbedding 时直接崩。
+
+    "未安装工具"与"网络抖动"是两回事：
+      - 网络抖动：模型以后还有机会自动下载，不该阻断 profile run；
+      - 没装工具：这条命令**根本不可能**成功，必须让人知道。
+    两者都返回非 0，但报错措辞不同，好让 F 一眼看出该装东西还是该重试。
+    """
     try:
         from huggingface_hub import snapshot_download  # type: ignore[import-not-found]
     except ImportError:
         print(
-            f"! 未安装 huggingface_hub，跳过预下载 {model_id}\n"
-            f"  模型会在首次请求时由 FlagEmbedding 自动下载到 {cache_dir}",
+            f"✗ 未安装 huggingface_hub，无法预下载 {model_id}。\n"
+            f"  这个镜像（WITH_MODELS=0）刻意不含模型依赖。要预下载请先构建带模型依赖的镜像：\n"
+            f"    WITH_MODELS=1 docker compose build model-puller\n"
+            f"    docker compose --profile models run --rm model-puller",
             file=sys.stderr,
         )
-        return True
+        return False
 
     try:
         path = snapshot_download(repo_id=model_id, cache_dir=cache_dir)
-    except Exception as exc:  # noqa: BLE001 —— 任何网络错误都只报告不中断
+    except Exception as exc:  # noqa: BLE001 —— 网络错误只报告不抛栈
         print(f"✗ {model_id} 下载失败：{exc}", file=sys.stderr)
         return False
 

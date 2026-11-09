@@ -2,6 +2,10 @@ services:
   # ==========================================================
   # 【F 所有】compose 服务名与端口为冻结项（SKILL.md §6.1）
   # A—E 不得自行增删服务；需要新依赖先找 F。
+  #
+  # 本文件有 7 个常驻服务 + 2 个一次性/可选服务：
+  #   qdrant-init  一次性，建完 collection 就退出（无 profile，每次 up 都跑）
+  #   model-puller 可选，用 --profile models 手动跑
   # ==========================================================
 
   nginx:
@@ -65,6 +69,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # rag-core 的 healthcheck 要等模型加载完才绿（stub 模式秒过）。
+      # 这里用 service_started 而不是 service_healthy：api-server 在 rag-core
+      # 还没准备好时也能提供 /healthz 与 /api/v1/notices，把它的启动绑在
+      # B 的模型加载上只会让整条链一起卡住。
       rag-core:
         condition: service_started
     healthcheck:
@@ -79,6 +87,11 @@ services:
     build:
       context: ./rag-core
       dockerfile: Dockerfile
+      args:
+        # 0 = 不装 torch/FlagEmbedding（镜像约 300 MB，只能跑 RAG_STUB_MODE=true）
+        # 1 = 装模型依赖（约 4.5 GB，才能跑真实检索）
+        # 两个服务的这个 arg 必须一起改，否则 model-puller 下完模型、rag-core 却 import 不了。
+        WITH_MODELS: ${WITH_MODELS:-0}
     container_name: sgu-rag-core
     environment:
       VECTOR_DB_URL: ${VECTOR_DB_URL:-http://qdrant:6333}
@@ -86,17 +99,27 @@ services:
       EMBED_MODEL: ${EMBED_MODEL:-BAAI/bge-m3}
       RERANK_MODEL: ${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
       RAG_TOP_K: ${RAG_TOP_K:-20}
-      RAG_STUB_MODE: ${RAG_STUB_MODE:-false}
+      # 默认 true：干净机器上没下载模型也能把整条链路跑通（见 docs/deployment.md §2）。
+      # 模型下好之后在 .env 里改成 false，才是真实检索。
+      RAG_STUB_MODE: ${RAG_STUB_MODE:-true}
       # 与下面 model-cache 卷的挂载点一致；两处不同就等于每次重建都重下模型
       MODEL_CACHE_DIR: /models
       HF_HOME: /models
       POSTGRES_URL: ${POSTGRES_URL:-postgres://sgu:sgu@postgres:5432/sgu?sslmode=disable}
       TZ: ${TZ:-Asia/Shanghai}
-    ports:
-      - "8000:8000"
+    # **不映射到宿主机**：`/internal/*` 是内部接口，只有 C 该调用它。
+    # 映射成 8000:8000 会让它绕过 nginx 直接出网，`infra/nginx/default.conf`
+    # 里那句 `location /internal/ { return 404; }` 也就形同虚设。
+    # 需要本地调试时：docker compose exec rag-core curl -s localhost:8000/internal/health
+    expose:
+      - "8000"
     depends_on:
       qdrant:
         condition: service_healthy
+      # 必须等 collection 建好：rag-core 的 ping() 打的是 get_collection，
+      # collection 不存在会被判定为 down，/internal/health 直接 503。
+      qdrant-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/internal/health').status==200 else 1)"]
       interval: 20s
@@ -106,6 +129,28 @@ services:
     volumes:
       - model-cache:/models
     restart: unless-stopped
+
+  # ---------- 一次性：建 Qdrant collection 与 payload 索引 ----------
+  # 为什么必须是独立服务而不是写进 rag-core 启动脚本：
+  # collection 的 schema（向量维度、距离函数、索引类型）属于**数据层契约**，
+  # 藏在 B 的启动路径里就等于让检索代码顺手改数据库结构。
+  # 做成一次性服务后，`docker compose up` 的语义是"先把库准备好，再起服务"。
+  qdrant-init:
+    image: curlimages/curl:8.10.1
+    container_name: sgu-qdrant-init
+    volumes:
+      - ./infra/scripts/init-qdrant.sh:/init-qdrant.sh:ro
+    entrypoint: ["sh", "/init-qdrant.sh"]
+    environment:
+      VECTOR_DB_URL: http://qdrant:6333
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-sgu_notices}
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    # 跑完就退出，不要重启。失败时 rag-core 会因
+    # service_completed_successfully 不满足而拒绝启动 —— 这是有意的：
+    # 一个没有 collection 的检索服务，比一个起不来的检索服务更难排查。
+    restart: "no"
 
   qdrant:
     image: qdrant/qdrant:v1.12.4
@@ -165,13 +210,17 @@ services:
 
   # ==========================================================
   # profile=models：手动执行一次，预下载模型权重（可选）
-  #   docker compose --profile models run --rm rag-core python -m app.tools.pull_models
+  #   docker compose --profile models run --rm model-puller
   # ==========================================================
   model-puller:
     profiles: ["models"]
     build:
       context: ./rag-core
       dockerfile: Dockerfile
+      args:
+        # 必须与 rag-core 一致。设 0 时镜像里没有 huggingface_hub，
+        # pull_models 会明确报错退出 1（而不是假装成功）。
+        WITH_MODELS: ${WITH_MODELS:-0}
     container_name: sgu-model-puller
     command: ["python", "-m", "app.tools.pull_models"]
     environment:

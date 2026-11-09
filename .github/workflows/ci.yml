@@ -133,5 +133,19 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm build
+      - name: 部署静态校验（不启动容器）
+        run: |
+          # compose 文件本身语法 / 依赖 / 变量解析是否成立
+          docker compose config -q
+          docker compose --profile models config -q
+          # 服务清单必须与 docs/deployment.md §3 的表一致
+          got=$(docker compose config --services | sort | tr '\n' ' ')
+          want="api-server frontend nginx postgres qdrant qdrant-init rag-core redis "
+          echo "services: $got"
+          [ "$got" = "$want" ] || { echo "✗ 服务清单不一致"; echo "  期望: $want"; exit 1; }
+      - name: 初始化脚本行为测试
+        # ubuntu-latest 自带 python3，这里不额外装 setup-python：
+        # 脚本只用标准库，装一遍反而多 20 秒。
+        run: python3 infra/scripts/test-init-qdrant.py
       - name: docker compose build（只构建不启动）
         run: docker compose build --parallel

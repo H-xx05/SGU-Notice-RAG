@@ -92,7 +92,7 @@ git switch -c feat/F-infra          # F
 
 | 项 | 内容 |
 |---|---|
-| **第一步** | `cp .env.example .env && docker compose up -d --build`，然后 `docker compose ps` 看 7 个服务是否都 healthy |
+| **第一步** | `cp .env.example .env && docker compose up -d --build`，然后 `docker compose ps` 看 7 个常驻服务是否 running、`qdrant-init` 是否 `Exited (0)` |
 | **本周五必交** | ① 干净机器上 **10 分钟内**从 clone 到浏览器可访问（`docs/deployment.md §2` 五步）；② CI 三绿（lint / test / build）；③ 首次启动把模型卷预下载打通（`docker compose --profile models run --rm model-puller`） |
 | **不要做** | 不要改服务名与端口（`SKILL.md §6.1` 冻结）；不要给 `nginx` 挂 `./frontend/dist`（dist 是构建产物且已 gitignore，干净 clone 的机器上不存在）—— 前端是**独立容器**，nginx 只做转发 |
 | **验收命令** | `docker compose config --quiet && docker compose up -d` 后逐项 `curl` |
@@ -164,7 +164,7 @@ bash .claude/skills/sgu-notice-rag-dev/scripts/check-contract.sh
 | **C** | 我正在改 Go API。先读 `docs/api.md`，然后逐条核对我注册的路由：路径、HTTP 方法、是否挂了 JWT、限流 spec 名称、错误码，是否与契约表完全一致；并确认 `internal/client/ragcore.go` 是唯一访问 rag-core 的地方。 |
 | **D** | 我正在改前端。先读 `docs/api.md` 与 `frontend/src/api/types.ts`，然后检查我的请求层：路径是否都在契约内、字段名是否与契约逐字一致、有没有硬编码后端地址、`VITE_USE_MOCK` 是否仍默认 `true`、`effective_to === null` 是否渲染成"长期有效"。 |
 | **E** | 我正在改评估。先读 `eval/README.md` 与 `eval/thresholds.json`，然后检查我新增的 query：`query_id` 是否唯一、`category` 是否用了枚举值、`no_answer` 是否带 `expect_refusal:true`、`expected_doc_ids` 是否用了真实 `doc_id` 格式（`jwb-jxtz-{年}-{站点news_id}`）。 |
-| **F** | 我正在改基础设施。先读 `docs/deployment.md §3`，然后检查 `docker-compose.yml`：7 个服务名与端口是否与文档表一致、每个服务是否都有 healthcheck、`depends_on` 是否用了 `condition: service_healthy`、前端环境变量是否走 `build.args`（不是 `environment`）。 |
+| **F** | 我正在改基础设施。先读 `docs/deployment.md §3`，然后检查 `docker-compose.yml`：7 个常驻服务名与端口是否与文档表一致、每个服务是否都有 healthcheck、`depends_on` 是否用了 `condition: service_healthy`、前端环境变量是否走 `build.args`（不是 `environment`）。 |
 
 ---
 

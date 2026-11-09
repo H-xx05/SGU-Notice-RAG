@@ -22,7 +22,7 @@ docker compose up -d --build
 | API 健康检查 | <http://localhost:8088/healthz> |
 | 只跑前端（Mock，零后端） | `cd frontend && pnpm i && VITE_USE_MOCK=true pnpm dev` → <http://localhost:5173> |
 
-> 全部 7 个容器的端口、健康检查、排障见 [`docs/deployment.md`](docs/deployment.md)。
+> 全部 7 个常驻容器 + 1 个一次性 `qdrant-init` 的端口、健康检查、排障见 [`docs/deployment.md`](docs/deployment.md)。
 
 ---
 
